@@ -28,12 +28,13 @@ import android.content.DialogInterface;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
 import android.database.Cursor;
-import android.database.MatrixCursor;
 import android.database.sqlite.SQLiteDatabase;
 import android.graphics.Typeface;
 import android.os.Build;
 import android.os.Bundle;
+import android.text.Editable;
 import android.text.TextUtils;
+import android.text.TextWatcher;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.View;
@@ -44,8 +45,8 @@ import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.CompoundButton;
 import android.widget.DatePicker;
-import android.widget.FilterQueryProvider;
 import android.widget.ImageButton;
+import android.widget.LinearLayout;
 import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -54,7 +55,6 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.constraintlayout.widget.Group;
-import androidx.cursoradapter.widget.SimpleCursorAdapter;
 import androidx.lifecycle.Observer;
 import androidx.preference.PreferenceManager;
 
@@ -65,6 +65,9 @@ import java.util.List;
 import java.util.Objects;
 
 public class FragmentDialogSearch extends FragmentDialogBase {
+    private boolean suppressSuggestions = false;
+
+    private static final int MIN_SUGGESTION_LENGTH = 2;
     private static final int MAX_SUGGESTIONS = 3;
     private static final int RECENTLY_TOUCHED = 7 * 24; // hours
 
@@ -99,6 +102,7 @@ public class FragmentDialogSearch extends FragmentDialogBase {
         final View dview = LayoutInflater.from(context).inflate(R.layout.dialog_search, null);
 
         final TextViewAutoCompleteAction etQuery = dview.findViewById(R.id.etQuery);
+        final LinearLayout llSuggestions = dview.findViewById(R.id.llSuggestions);
         final Button btnSearch1 = dview.findViewById(R.id.btnSearch1);
         final Button btnSearch2 = dview.findViewById(R.id.btnSearch2);
         final Button btnSearch3 = dview.findViewById(R.id.btnSearch3);
@@ -150,59 +154,6 @@ public class FragmentDialogSearch extends FragmentDialogBase {
             }
         });
 
-        SimpleCursorAdapter adapter = new SimpleCursorAdapter(
-                context,
-                R.layout.search_suggestion,
-                null,
-                new String[]{"suggestion"},
-                new int[]{android.R.id.text1},
-                0);
-
-        adapter.setFilterQueryProvider(new FilterQueryProvider() {
-            public Cursor runQuery(CharSequence typed) {
-                Log.i("Search suggest=" + typed);
-
-                MatrixCursor cursor = new MatrixCursor(new String[]{"_id", "suggestion"});
-                if (TextUtils.isEmpty(typed))
-                    return cursor;
-
-                int i = 1;
-
-                String keyword = TupleKeyword.getKeyword(context, typed.toString());
-                if (!TextUtils.isEmpty(keyword))
-                    cursor.addRow(new Object[]{i++, keyword});
-
-                if (cbSearchIndex.isEnabled() && cbSearchIndex.isChecked()) {
-                    SQLiteDatabase db = Fts4DbHelper.getInstance(context);
-                    List<String> suggestions = Fts4DbHelper.getSuggestions(
-                            db,
-                            typed + "%",
-                            MAX_SUGGESTIONS);
-                    for (String suggestion : suggestions)
-                        cursor.addRow(new Object[]{i++, suggestion});
-
-                    return cursor;
-                }
-
-                DB db = DB.getInstance(context);
-                return db.message().getSuggestions(
-                        cbSubject.isChecked(),
-                        cbSenders.isChecked(),
-                        account < 0 ? null : account,
-                        folder < 0 ? null : folder,
-                        "%" + typed + "%",
-                        MAX_SUGGESTIONS);
-            }
-        });
-
-        adapter.setCursorToStringConverter(new SimpleCursorAdapter.CursorToStringConverter() {
-            @Override
-            public CharSequence convertToString(Cursor cursor) {
-                int colSuggestion = cursor.getColumnIndex("suggestion");
-                return cursor.getString(colSuggestion);
-            }
-        });
-
         etQuery.setActionRunnable(new Runnable() {
             @Override
             public void run() {
@@ -211,12 +162,144 @@ public class FragmentDialogSearch extends FragmentDialogBase {
         });
         etQuery.setActionEnabled(true);
 
-        etQuery.setAdapter(adapter);
+        etQuery.addTextChangedListener(new TextWatcher() {
+            @Override
+            public void beforeTextChanged(CharSequence s, int start, int count, int after) {
+                // Do nothing
+            }
+
+            @Override
+            public void onTextChanged(CharSequence s, int start, int before, int count) {
+                // Do nothing
+            }
+
+            @Override
+            public void afterTextChanged(Editable s) {
+                if (suppressSuggestions)
+                    return;
+
+                String typed = (s == null ? "" : s.toString());
+                if (typed.length() < MIN_SUGGESTION_LENGTH) {
+                    llSuggestions.removeAllViews();
+                    llSuggestions.setVisibility(View.GONE);
+                    return;
+                }
+
+                Bundle sargs = new Bundle();
+                sargs.putString("typed", typed);
+                sargs.putBoolean("fts", cbSearchIndex.isEnabled() && cbSearchIndex.isChecked());
+                sargs.putBoolean("subject", cbSubject.isChecked());
+                sargs.putBoolean("senders", cbSenders.isChecked());
+                sargs.putLong("account", account);
+                sargs.putLong("folder", folder);
+
+                new SimpleTask<List<String>>() {
+                    @Override
+                    protected List<String> onExecute(Context context, Bundle args) {
+                        String typed = args.getString("typed");
+                        Log.i("Search suggest=" + typed);
+
+                        List<String> result = new ArrayList<>();
+                        if (TextUtils.isEmpty(typed))
+                            return result;
+
+                        String keyword = TupleKeyword.getKeyword(context, typed);
+                        if (!TextUtils.isEmpty(keyword))
+                            result.add(keyword);
+
+                        if (args.getBoolean("fts")) {
+                            SQLiteDatabase db = Fts4DbHelper.getInstance(context);
+                            List<String> suggestions = Fts4DbHelper.getSuggestions(
+                                    db,
+                                    typed + "%",
+                                    MAX_SUGGESTIONS);
+                            for (String suggestion : suggestions)
+                                if (!TextUtils.isEmpty(suggestion) && !result.contains(suggestion))
+                                    result.add(suggestion);
+
+                            return result;
+                        }
+
+                        long aid = args.getLong("account", -1);
+                        long fid = args.getLong("folder", -1);
+                        DB db = DB.getInstance(context);
+                        try (Cursor cursor = db.message().getSuggestions(
+                                args.getBoolean("subject"),
+                                args.getBoolean("senders"),
+                                aid < 0 ? null : aid,
+                                fid < 0 ? null : fid,
+                                "%" + typed + "%",
+                                MAX_SUGGESTIONS)) {
+                            if (cursor != null) {
+                                int colSuggestion = cursor.getColumnIndex("suggestion");
+                                while (cursor.moveToNext()) {
+                                    String suggestion = cursor.getString(colSuggestion);
+                                    if (!TextUtils.isEmpty(suggestion) && !result.contains(suggestion))
+                                        result.add(suggestion);
+                                }
+                            }
+                        }
+
+                        return result;
+                    }
+
+                    @Override
+                    protected void onExecuted(Bundle args, List<String> suggestions) {
+                        String typed = args.getString("typed");
+                        String current = etQuery.getText().toString();
+                        if (suppressSuggestions || !Objects.equals(typed, current))
+                            return;
+
+                        llSuggestions.removeAllViews();
+                        if (suggestions == null || suggestions.isEmpty()) {
+                            llSuggestions.setVisibility(View.GONE);
+                            return;
+                        }
+
+                        LayoutInflater inflater = LayoutInflater.from(etQuery.getContext());
+                        for (final String suggestion : suggestions) {
+                            View item = inflater.inflate(R.layout.search_suggestion, llSuggestions, false);
+                            TextView tv = item.findViewById(android.R.id.text1);
+                            tv.setText(suggestion);
+                            item.setOnClickListener(new View.OnClickListener() {
+                                @Override
+                                public void onClick(View v) {
+                                    suppressSuggestions = true;
+                                    try {
+                                        etQuery.setText(suggestion);
+                                        etQuery.setSelection(etQuery.getText().length());
+                                    } finally {
+                                        suppressSuggestions = false;
+                                    }
+                                    llSuggestions.removeAllViews();
+                                    llSuggestions.setVisibility(View.GONE);
+                                    etQuery.requestFocus();
+                                }
+                            });
+                            llSuggestions.addView(item);
+                        }
+                        llSuggestions.setVisibility(View.VISIBLE);
+                    }
+
+                    @Override
+                    protected void onException(Bundle args, Throwable ex) {
+                        Log.w(ex);
+                    }
+                }.serial().execute(context, getViewLifecycleOwner(), sargs, "search:suggest");
+            }
+        });
 
         View.OnClickListener onSearch = new View.OnClickListener() {
             @Override
             public void onClick(View v) {
-                etQuery.setText(((TextView) v).getText());
+                suppressSuggestions = true;
+                try {
+                    etQuery.setText(((TextView) v).getText());
+                } finally {
+                    suppressSuggestions = false;
+                }
+                llSuggestions.removeAllViews();
+                llSuggestions.setVisibility(View.GONE);
                 ((AlertDialog) getDialog()).getButton(DialogInterface.BUTTON_POSITIVE).performClick();
             }
         };
@@ -226,7 +309,15 @@ public class FragmentDialogSearch extends FragmentDialogBase {
             public boolean onLongClick(View v) {
                 String text = ((TextView) v).getText().toString();
 
-                etQuery.setText(text);
+                suppressSuggestions = true;
+                try {
+                    etQuery.setText(text);
+                    etQuery.setSelection(etQuery.getText().length());
+                } finally {
+                    suppressSuggestions = false;
+                }
+                llSuggestions.removeAllViews();
+                llSuggestions.setVisibility(View.GONE);
 
                 ClipboardManager cbm = Helper.getSystemService(v.getContext(), ClipboardManager.class);
                 cbm.setPrimaryClip(ClipData.newPlainText(getString(R.string.app_name), text));
@@ -446,7 +537,12 @@ public class FragmentDialogSearch extends FragmentDialogBase {
             tvBefore.setText(null);
             cbSearchDevice.setChecked(last_search_device);
         } else {
-            etQuery.setText(criteria.query);
+            suppressSuggestions = true;
+            try {
+                etQuery.setText(criteria.query);
+            } finally {
+                suppressSuggestions = false;
+            }
             cbSearchIndex.setChecked(criteria.fts);
             cbSearchIndex.setEnabled(criteria.fts && pro);
             cbSenders.setChecked(criteria.in_senders);
@@ -782,7 +878,9 @@ public class FragmentDialogSearch extends FragmentDialogBase {
     @Override
     public void onActivityCreated(@Nullable Bundle savedInstanceState) {
         super.onActivityCreated(savedInstanceState);
-        getDialog().getWindow().setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE);
+        getDialog().getWindow().setSoftInputMode(
+                WindowManager.LayoutParams.SOFT_INPUT_STATE_VISIBLE |
+                WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE);
     }
 
     @Override

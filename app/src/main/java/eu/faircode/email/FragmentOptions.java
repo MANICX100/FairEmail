@@ -38,6 +38,8 @@ import android.view.MenuInflater;
 import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.AdapterView;
+import android.widget.ListView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -46,7 +48,6 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.widget.SearchView;
 import androidx.core.content.ContextCompat;
-import androidx.cursoradapter.widget.CursorAdapter;
 import androidx.cursoradapter.widget.SimpleCursorAdapter;
 import androidx.fragment.app.Fragment;
 import androidx.fragment.app.FragmentManager;
@@ -63,11 +64,14 @@ import com.google.android.material.tabs.TabLayout;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
 public class FragmentOptions extends FragmentBase {
     private ViewPager pager;
     private PagerAdapter adapter;
+    private ListView lvSuggestions;
+    private SimpleCursorAdapter suggestionsAdapter;
     private String searching = null;
     private SuggestData data = null;
 
@@ -205,6 +209,16 @@ public class FragmentOptions extends FragmentBase {
         adapter = new PagerAdapter(getChildFragmentManager());
         pager.setAdapter(adapter);
 
+        lvSuggestions = view.findViewById(R.id.lvSuggestions);
+        suggestionsAdapter = new SimpleCursorAdapter(
+                view.getContext(),
+                R.layout.spinner_item1_dropdown,
+                null,
+                new String[]{"title"},
+                new int[]{android.R.id.text1},
+                0);
+        lvSuggestions.setAdapter(suggestionsAdapter);
+
         pager.addOnPageChangeListener(new ViewPager.OnPageChangeListener() {
             @Override
             public void onPageScrolled(int position, float positionOffset, int positionOffsetPixels) {
@@ -307,15 +321,10 @@ public class FragmentOptions extends FragmentBase {
         if (searchView != null)
             searchView.setQueryHint(getString(R.string.title_search));
 
-        final SearchView.OnSuggestionListener onSuggestionListener = new SearchView.OnSuggestionListener() {
+        final AdapterView.OnItemClickListener onSuggestionClick = new AdapterView.OnItemClickListener() {
             @Override
-            public boolean onSuggestionSelect(int position) {
-                return false;
-            }
-
-            @Override
-            public boolean onSuggestionClick(int position) {
-                Cursor cursor = searchView.getSuggestionsAdapter().getCursor();
+            public void onItemClick(AdapterView<?> parent, View itemView, int position, long id) {
+                Cursor cursor = (suggestionsAdapter == null ? null : suggestionsAdapter.getCursor());
 
                 if (cursor != null && cursor.moveToPosition(position)) {
                     int tab = cursor.getInt(cursor.getColumnIndex("tab"));
@@ -351,13 +360,28 @@ public class FragmentOptions extends FragmentBase {
                         }
                     }
                 }
-
-                return true;
             }
         };
 
-        if (searchView != null)
-            searchView.setOnSuggestionListener(onSuggestionListener);
+        if (lvSuggestions != null)
+            lvSuggestions.setOnItemClickListener(onSuggestionClick);
+
+        menuSearch.setOnActionExpandListener(new MenuItem.OnActionExpandListener() {
+            @Override
+            public boolean onMenuItemActionExpand(MenuItem item) {
+                return true;
+            }
+
+            @Override
+            public boolean onMenuItemActionCollapse(MenuItem item) {
+                searching = null;
+                if (suggestionsAdapter != null)
+                    suggestionsAdapter.changeCursor(null);
+                if (lvSuggestions != null)
+                    lvSuggestions.setVisibility(View.GONE);
+                return true;
+            }
+        });
 
         if (searchView != null)
             searchView.setOnQueryTextListener(new SearchView.OnQueryTextListener() {
@@ -365,9 +389,8 @@ public class FragmentOptions extends FragmentBase {
                 public boolean onQueryTextSubmit(String query) {
                     searching = query;
 
-                    CursorAdapter adapter = searchView.getSuggestionsAdapter();
-                    if (adapter != null && adapter.getCount() > 0)
-                        onSuggestionListener.onSuggestionClick(0);
+                    if (suggestionsAdapter != null && suggestionsAdapter.getCount() > 0)
+                        onSuggestionClick.onItemClick(lvSuggestions, null, 0, 0);
 
                     return false;
                 }
@@ -429,6 +452,9 @@ public class FragmentOptions extends FragmentBase {
                 }
 
                 private void _suggest(String query) {
+                    if (!Objects.equals(query, searching))
+                        return;
+
                     MatrixCursor cursor = new MatrixCursor(new String[]{"_id", "tab", "resid", "title"});
 
                     if (data != null &&
@@ -438,15 +464,10 @@ public class FragmentOptions extends FragmentBase {
                             id = getSuggestions(query.toLowerCase(), id, tab, data.titles[tab], data.views[tab], cursor);
                     }
 
-                    searchView.setSuggestionsAdapter(new SimpleCursorAdapter(
-                            pager.getContext(),
-                            R.layout.spinner_item1_dropdown,
-                            cursor,
-                            new String[]{"title"},
-                            new int[]{android.R.id.text1},
-                            0
-                    ));
-                    searchView.getSuggestionsAdapter().notifyDataSetChanged();
+                    if (suggestionsAdapter != null)
+                        suggestionsAdapter.changeCursor(cursor);
+                    if (lvSuggestions != null)
+                        lvSuggestions.setVisibility(cursor.getCount() > 0 ? View.VISIBLE : View.GONE);
                 }
 
                 private int getSuggestions(String query, int id, int tab, String title, View view, MatrixCursor cursor) {
@@ -496,6 +517,10 @@ public class FragmentOptions extends FragmentBase {
         getViewLifecycleOwner().getLifecycle().addObserver(new LifecycleObserver() {
             @OnLifecycleEvent(Lifecycle.Event.ON_DESTROY)
             public void onDestroyed() {
+                if (suggestionsAdapter != null)
+                    suggestionsAdapter.changeCursor(null);
+                if (lvSuggestions != null)
+                    lvSuggestions.setVisibility(View.GONE);
                 menuSearch.collapseActionView();
                 getViewLifecycleOwner().getLifecycle().removeObserver(this);
             }

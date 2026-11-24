@@ -36,6 +36,11 @@ For support you can use [the contact form](https://contact.faircode.eu/?product=
 
 ### Next version (Work in progress)
 
+* Fixed soft keyboard losing focus / dismissing after typing 2 characters in message search (`FragmentDialogSearch`) and settings search (`FragmentOptions`) by rendering search suggestions inline instead of inside a `PopupWindow` (`ListPopupWindow`):
+  * Replaced `AutoCompleteTextView` dropdown popup in `FragmentDialogSearch` / `dialog_search.xml` with a non-focusable inline `LinearLayout` (`llSuggestions`) updated asynchronously via `SimpleTask`, with stale-query guarding, deduplication, and `SOFT_INPUT_ADJUST_RESIZE`.
+  * Replaced `SearchView` suggestions popup adapter in `FragmentOptions` / `fragment_options.xml` with a non-focusable inline `ListView` (`lvSuggestions`) reusing a single `SimpleCursorAdapter` via `changeCursor`, with stale-query guarding and lifecycle/collapse cleanup.
+  * Updated `search_suggestion.xml` items to be non-focusable with touch ripple feedback and bounded text layout.
+
 ### 1.2341 2026-11-13 *
 
 * Small improvements and minor bug fixes
